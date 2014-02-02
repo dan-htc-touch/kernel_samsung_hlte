@@ -435,7 +435,6 @@ static void *msm_bus_noc_allocate_noc_data(struct platform_device *pdev,
 		GFP_KERNEL);
 	if (!ninfo->mas_modes) {
 		MSM_BUS_DBG("Couldn't alloc mem for noc master-modes\n");
-		kfree(ninfo);
 		return NULL;
 	}
 
@@ -445,7 +444,9 @@ static void *msm_bus_noc_allocate_noc_data(struct platform_device *pdev,
 			GFP_KERNEL);
 		if (!ninfo->cdata[i].mas) {
 			MSM_BUS_DBG("Couldn't alloc mem for noc master-bw\n");
-			goto err;
+			kfree(ninfo->mas_modes);
+			kfree(ninfo);
+			return NULL;
 		}
 
 		ninfo->cdata[i].slv = kzalloc(sizeof(struct
@@ -453,6 +454,7 @@ static void *msm_bus_noc_allocate_noc_data(struct platform_device *pdev,
 			GFP_KERNEL);
 		if (!ninfo->cdata[i].slv) {
 			MSM_BUS_DBG("Couldn't alloc mem for noc master-bw\n");
+			kfree(ninfo->cdata[i].mas);
 			goto err;
 		}
 	}
@@ -486,12 +488,6 @@ skip_mem:
 	return (void *)ninfo;
 
 err:
-	for (i = 0; i < NUM_CTX; i++) {
-		if (ninfo->cdata[i].mas)
-			kfree(ninfo->cdata[i].mas);
-		if (ninfo->cdata[i].slv)
-			kfree(ninfo->cdata[i].slv);
-	}
 	kfree(ninfo->mas_modes);
 	kfree(ninfo);
 	return NULL;
@@ -515,7 +511,7 @@ static void msm_bus_noc_update_bw(struct msm_bus_inode_info *hop,
 	struct msm_bus_noc_info *ninfo;
 	struct msm_bus_noc_qos_bw qos_bw;
 	int i, ports;
-	int64_t bw;
+	long int bw;
 	struct msm_bus_noc_commit *sel_cd =
 		(struct msm_bus_noc_commit *)sel_cdata;
 
@@ -610,6 +606,13 @@ static int msm_bus_noc_port_unhalt(uint32_t haltid, uint8_t mport)
 	return 0;
 }
 
+static void msm_bus_noc_config_master(
+	struct msm_bus_fabric_registration *pdata,
+	struct msm_bus_inode_info *info,
+	uint64_t req_clk, uint64_t req_bw)
+{
+}
+
 int msm_bus_noc_hw_init(struct msm_bus_fabric_registration *pdata,
 	struct msm_bus_hw_algorithm *hw_algo)
 {
@@ -623,7 +626,7 @@ int msm_bus_noc_hw_init(struct msm_bus_fabric_registration *pdata,
 	hw_algo->commit = msm_bus_noc_commit;
 	hw_algo->port_halt = msm_bus_noc_port_halt;
 	hw_algo->port_unhalt = msm_bus_noc_port_unhalt;
-	hw_algo->config_master = NULL;
+	hw_algo->config_master = msm_bus_noc_config_master;
 
 	return 0;
 }

@@ -2,7 +2,7 @@
 # Input core configuration
 #
 menuconfig INPUT_KEYBOARD
-	bool "Keyboards" if EXPERT || !X86
+	bool "Keyboards"
 	default y
 	help
 	  Say Y here, and a list of supported keyboards will be displayed.
@@ -11,6 +11,10 @@ menuconfig INPUT_KEYBOARD
 	  If unsure, say Y.
 
 if INPUT_KEYBOARD
+
+config DUAL_LCD
+	bool "Support DUAL LCD"
+	default n
 
 config KEYBOARD_ADP5520
 	tristate "Keypad Support for ADP5520 PMIC"
@@ -67,7 +71,7 @@ config KEYBOARD_ATARI
 	  module will be called atakbd.
 
 config KEYBOARD_ATKBD
-	tristate "AT keyboard" if EXPERT || !X86
+	tristate "AT keyboard"
 	default y
 	select SERIO
 	select SERIO_LIBPS2
@@ -615,14 +619,18 @@ config KEYBOARD_W90P910
 	  To compile this driver as a module, choose M here: the
 	  module will be called w90p910_keypad.
 
-endif
-
 config SENSORS_HALL
 	bool "HALL"
 	help
 	  Say Y here to enable the HALL
 
+config INPUT_FLIP
+        tristate "INPUT_FLIP"
+	help
+	  Say Y here if you want to support gpio based Flip...
+	  
+endif
 
 source "drivers/input/keyboard/cypress_touchkey/Kconfig"
 source "drivers/input/keyboard/cypress_touchkey_h/Kconfig"
-source "drivers/input/keyboard/cypress_touchkey_ks01/Kconfig"
+source "drivers/input/keyboard/melfas_touchkey/Kconfig"

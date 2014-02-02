@@ -564,6 +564,7 @@ static int tsens_tz_set_trip_temp(struct thermal_zone_device *thermal,
 	unsigned int reg_cntl;
 	int code, hi_code, lo_code, code_err_chk, sensor_sw_id = 0, rc = 0;
 
+	pr_info("%s debug trip = %d, temp = %ld\n", __func__, trip, temp);
 	if (!tm_sensor || trip < 0)
 		return -EINVAL;
 
@@ -664,15 +665,6 @@ static void tsens_scheduler_fn(struct work_struct *work)
 			lower_thr = true;
 		}
 		if (upper_thr || lower_thr) {
-			unsigned long temp;
-			enum thermal_trip_type trip =
-					THERMAL_TRIP_CONFIGURABLE_LOW;
-
-			if (upper_thr)
-				trip = THERMAL_TRIP_CONFIGURABLE_HI;
-			tsens_tz_get_temp(tm->sensor[i].tz_dev, &temp);
-			thermal_sensor_trip(tm->sensor[i].tz_dev, trip, temp);
-
 			/* Notify user space */
 			queue_work(tm->tsens_wq, &tm->sensor[i].work);
 			rc = tsens_get_sw_id_mapping(
@@ -680,7 +672,7 @@ static void tsens_scheduler_fn(struct work_struct *work)
 					&sensor_sw_id);
 			if (rc < 0)
 				pr_err("tsens mapping index not found\n");
-			pr_debug("sensor:%d trigger temp (%d degC)\n",
+			pr_info("sensor:%d trigger temp (%d degC)\n",
 				tm->sensor[i].sensor_hw_num,
 				tsens_tz_code_to_degc((status &
 				TSENS_SN_STATUS_TEMP_MASK),
@@ -1608,6 +1600,8 @@ static int __devinit _tsens_register_thermal(void)
 		}
 	}
 
+	INIT_WORK(&tmdev->tsens_work, tsens_scheduler_fn);
+
 	rc = request_irq(tmdev->tsens_irq, tsens_isr,
 		IRQF_TRIGGER_RISING, "tsens_interrupt", tmdev);
 	if (rc < 0) {
@@ -1619,8 +1613,6 @@ static int __devinit _tsens_register_thermal(void)
 		enable_irq_wake(tmdev->tsens_irq);
 	}
 	platform_set_drvdata(pdev, tmdev);
-
-	INIT_WORK(&tmdev->tsens_work, tsens_scheduler_fn);
 
 	return 0;
 fail:

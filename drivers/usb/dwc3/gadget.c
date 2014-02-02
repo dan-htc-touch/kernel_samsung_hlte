@@ -36,9 +36,7 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
 #include <linux/module.h>
-#endif
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
@@ -60,7 +58,7 @@
 #include "debug.h"
 #include "io.h"
 
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
+#ifdef CONFIG_SEC_H_PROJECT
 #define EP0_HS_MPS 64
 #define EP0_SS_MPS 512
 #define WORK_CANCEL(udc) \
@@ -72,8 +70,14 @@ schedule_work(&udc->reconnect_work);
 #define WORK_SCHEDULE(udc)
 #endif
 
-static void dwc3_gadget_usb2_phy_suspend(struct dwc3 *dwc, int suspend);
-static void dwc3_gadget_usb3_phy_suspend(struct dwc3 *dwc, int suspend);
+#if defined(CONFIG_MACH_LT03EUR) || defined(CONFIG_MACH_LT03SKT)\
+	|| defined(CONFIG_MACH_LT03KTT)	|| defined(CONFIG_MACH_LT03LGT)
+extern int system_rev;
+#endif 
+static bool tx_fifo_resize_enable;
+module_param(tx_fifo_resize_enable, bool, S_IRUGO|S_IWUSR);
+MODULE_PARM_DESC(tx_fifo_resize_enable,
+			"Enable allocating Tx fifo for endpoints");
 
 /**
  * dwc3_gadget_set_test_mode - Enables USB2 Test Modes
@@ -197,7 +201,7 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc)
 	int		mdwidth;
 	int		num;
 
-	if (!dwc->needs_fifo_resize)
+	if (!dwc->needs_fifo_resize && !tx_fifo_resize_enable)
 		return 0;
 
 	ram1_depth = DWC3_RAM1_DEPTH(dwc->hwparams.hwparams7);
@@ -242,23 +246,6 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc)
 		 * packets
 		 */
 		tmp = mult * (dep->endpoint.maxpacket + mdwidth);
-
-		if (dwc->tx_fifo_size &&
-			(usb_endpoint_xfer_bulk(dep->endpoint.desc)
-			|| usb_endpoint_xfer_isoc(dep->endpoint.desc))) {
-			/*
-			 * Allocate 3KB fifo size for bulk and isochronous TX
-			 * endpoints irrespective of speed if tx_fifo is not
-			 * reduced. Otherwise allocate 1KB for endpoints in HS
-			 * mode and for non burst endpoints in SS mode. For
-			 * interrupt ep, allocate fifo size of ep maxpacket.
-			 */
-			if (!dwc->tx_fifo_reduced)
-				tmp = 3 * (1024 + mdwidth);
-			else
-				tmp = mult * (1024 + mdwidth);
-		}
-
 		tmp += mdwidth;
 
 		fifo_size = DIV_ROUND_UP(tmp, mdwidth);
@@ -268,21 +255,10 @@ int dwc3_gadget_resize_tx_fifos(struct dwc3 *dwc)
 		dev_vdbg(dwc->dev, "%s: Fifo Addr %04x Size %d\n",
 				dep->name, last_fifo_depth, fifo_size & 0xffff);
 
-		last_fifo_depth += (fifo_size & 0xffff);
-		if (dwc->tx_fifo_size &&
-				(last_fifo_depth >= dwc->tx_fifo_size)) {
-			/*
-			 * Fifo size allocated exceeded available RAM size.
-			 * Hence return error.
-			 */
-			dev_err(dwc->dev, "Fifosize(%d) > available RAM(%d)\n",
-					last_fifo_depth, dwc->tx_fifo_size);
-			return -ENOMEM;
-		}
-
 		dwc3_writel(dwc->regs, DWC3_GTXFIFOSIZ(fifo_number),
 				fifo_size);
 
+		last_fifo_depth += (fifo_size & 0xffff);
 	}
 
 	return 0;
@@ -364,16 +340,6 @@ int dwc3_send_gadget_generic_command(struct dwc3 *dwc, int cmd, u32 param)
 {
 	u32		timeout = 500;
 	u32		reg;
-	bool hsphy_suspend_enabled;
-	int ret;
-
-	/* Commands to controller will work only if PHY is not suspended */
-	hsphy_suspend_enabled = (dwc3_readl(dwc->regs, DWC3_GUSB2PHYCFG(0)) &
-						DWC3_GUSB2PHYCFG_SUSPHY);
-
-	/* Disable suspend of the USB2 PHY */
-	if (hsphy_suspend_enabled)
-		dwc3_gadget_usb2_phy_suspend(dwc, false);
 
 	dwc3_writel(dwc->regs, DWC3_DGCMDPAR, param);
 	dwc3_writel(dwc->regs, DWC3_DGCMD, cmd | DWC3_DGCMD_CMDACT);
@@ -383,8 +349,7 @@ int dwc3_send_gadget_generic_command(struct dwc3 *dwc, int cmd, u32 param)
 		if (!(reg & DWC3_DGCMD_CMDACT)) {
 			dev_vdbg(dwc->dev, "Command Complete --> %d\n",
 					DWC3_DGCMD_STATUS(reg));
-			ret = 0;
-			break;
+			return 0;
 		}
 
 		/*
@@ -392,18 +357,10 @@ int dwc3_send_gadget_generic_command(struct dwc3 *dwc, int cmd, u32 param)
 		 * interrupt context.
 		 */
 		timeout--;
-		if (!timeout) {
-			ret = -ETIMEDOUT;
-			break;
-		}
+		if (!timeout)
+			return -ETIMEDOUT;
 		udelay(1);
 	} while (1);
-
-	/* Enable suspend of the USB2 PHY */
-	if (hsphy_suspend_enabled)
-		dwc3_gadget_usb2_phy_suspend(dwc, true);
-
-	return ret;
 }
 
 int dwc3_send_gadget_ep_cmd(struct dwc3 *dwc, unsigned ep,
@@ -412,21 +369,11 @@ int dwc3_send_gadget_ep_cmd(struct dwc3 *dwc, unsigned ep,
 	struct dwc3_ep		*dep = dwc->eps[ep];
 	u32			timeout = 500;
 	u32			reg;
-	bool hsphy_suspend_enabled;
-	int ret;
 
 	dev_vdbg(dwc->dev, "%s: cmd '%s' params %08x %08x %08x\n",
 			dep->name,
 			dwc3_gadget_ep_cmd_string(cmd), params->param0,
 			params->param1, params->param2);
-
-	/* Commands to controller will work only if PHY is not suspended */
-	hsphy_suspend_enabled = (dwc3_readl(dwc->regs, DWC3_GUSB2PHYCFG(0)) &
-						DWC3_GUSB2PHYCFG_SUSPHY);
-
-	/* Disable suspend of the USB2 PHY */
-	if (hsphy_suspend_enabled)
-		dwc3_gadget_usb2_phy_suspend(dwc, false);
 
 	dwc3_writel(dwc->regs, DWC3_DEPCMDPAR0(ep), params->param0);
 	dwc3_writel(dwc->regs, DWC3_DEPCMDPAR1(ep), params->param1);
@@ -445,10 +392,9 @@ int dwc3_send_gadget_ep_cmd(struct dwc3 *dwc, unsigned ep,
 			 * event. Hence return error in this case.
 			 */
 			if (reg & 0x2000)
-				ret = -EAGAIN;
+				return -EAGAIN;
 			else
-				ret = 0;
-			break;
+				return 0;
 		}
 
 		/*
@@ -456,19 +402,11 @@ int dwc3_send_gadget_ep_cmd(struct dwc3 *dwc, unsigned ep,
 		 * interrupt context.
 		 */
 		timeout--;
-		if (!timeout) {
-			ret = -ETIMEDOUT;
-			break;
-		}
+		if (!timeout)
+			return -ETIMEDOUT;
 
 		udelay(1);
 	} while (1);
-
-	/* Enable suspend of the USB2 PHY */
-	if (hsphy_suspend_enabled)
-		dwc3_gadget_usb2_phy_suspend(dwc, true);
-
-	return ret;
 }
 
 dma_addr_t dwc3_trb_dma_offset(struct dwc3_ep *dep,
@@ -1686,9 +1624,6 @@ static int dwc3_gadget_vbus_session(struct usb_gadget *_gadget, int is_active)
 	struct dwc3 *dwc = gadget_to_dwc(_gadget);
 	unsigned long flags;
 	int ret = 0;
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
-	int cancel_work = 0;
-#endif
 
 	if (!dwc->dotg)
 		return -EPERM;
@@ -1697,10 +1632,6 @@ static int dwc3_gadget_vbus_session(struct usb_gadget *_gadget, int is_active)
 
 	spin_lock_irqsave(&dwc->lock, flags);
 
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
-        if (!is_active)
-                dwc->ss_host_avail = -1;
-#endif
 	if (dwc->vbus_active == is_active) {
 		printk(KERN_ERR "dwc3 state is same\n");
 		spin_unlock_irqrestore(&dwc->lock, flags);
@@ -1722,10 +1653,10 @@ static int dwc3_gadget_vbus_session(struct usb_gadget *_gadget, int is_active)
 			 */
 			ret = dwc3_gadget_run_stop(dwc, 1);
 		} else {
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
+#ifdef CONFIG_SEC_H_PROJECT
 			dwc->ss_host_avail = -1;
 			dwc->speed_limit = dwc->gadget.max_speed;
-			cancel_work = 1;
+			WORK_CANCEL(dwc);
 #endif
 			ret = dwc3_gadget_run_stop(dwc, 0);
 		}
@@ -1741,9 +1672,6 @@ static int dwc3_gadget_vbus_session(struct usb_gadget *_gadget, int is_active)
 	}
 
 	spin_unlock_irqrestore(&dwc->lock, flags);
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
-	if (cancel_work)	WORK_CANCEL(dwc);
-#endif
 	return ret;
 }
 
@@ -1753,8 +1681,8 @@ void dwc3_gadget_restart(struct dwc3 *dwc)
 	struct dwc3_ep		*dep;
 	int			ret = 0;
 	u32			reg;
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
-	int			ep0_mps;
+#ifdef CONFIG_SEC_H_PROJECT
+	int 		ep0_mps;
 #endif
 	/* Enable all but Start and End of Frame IRQs */
 	reg = (DWC3_DEVTEN_EVNTOVERFLOWEN |
@@ -1769,10 +1697,6 @@ void dwc3_gadget_restart(struct dwc3 *dwc)
 
 	/* Enable USB2 LPM and automatic phy suspend only on recent versions */
 	if (dwc->revision >= DWC3_REVISION_194A) {
-		reg = dwc3_readl(dwc->regs, DWC3_DCFG);
-		reg |= DWC3_DCFG_LPM_CAP;
-		dwc3_writel(dwc->regs, DWC3_DCFG, reg);
-
 		reg = dwc3_readl(dwc->regs, DWC3_DCTL);
 		reg &= ~(DWC3_DCTL_HIRD_THRES_MASK | DWC3_DCTL_L1_HIBER_EN);
 
@@ -1780,9 +1704,6 @@ void dwc3_gadget_restart(struct dwc3 *dwc)
 		reg |= DWC3_DCTL_HIRD_THRES(28);
 
 		dwc3_writel(dwc->regs, DWC3_DCTL, reg);
-
-		dwc3_gadget_usb2_phy_suspend(dwc, true);
-		dwc3_gadget_usb3_phy_suspend(dwc, true);
 	}
 
 	reg = dwc3_readl(dwc->regs, DWC3_DCFG);
@@ -1804,7 +1725,7 @@ void dwc3_gadget_restart(struct dwc3 *dwc)
 	if (dwc->revision < DWC3_REVISION_220A)
 		reg |= DWC3_DCFG_SUPERSPEED;
 	else
-#if !defined(CONFIG_SEC_H_PROJECT) && !defined(CONFIG_SEC_F_PROJECT)
+#ifndef CONFIG_SEC_H_PROJECT
 		reg |= dwc->maximum_speed;
 #else
 		switch(dwc->speed_limit) {
@@ -1824,8 +1745,33 @@ void dwc3_gadget_restart(struct dwc3 *dwc)
 	dwc3_writel(dwc->regs, DWC3_DCFG, reg);
 
 	dwc->start_config_issued = false;
+#if defined(CONFIG_MACH_LT03EUR) || defined(CONFIG_MACH_LT03SKT)\
+	|| defined(CONFIG_MACH_LT03KTT)	|| defined(CONFIG_MACH_LT03LGT)
+	if(system_rev != 3)
+	{
+		/* Start with SuperSpeed Default */
+		dwc3_gadget_ep0_desc.wMaxPacketSize = cpu_to_le16(512);
 
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
+		dwc->delayed_status = false;
+		/* reinitialize physical ep0-1 */
+		dep = dwc->eps[0];
+		dep->flags = 0;
+		ret = __dwc3_gadget_ep_enable(dep, &dwc3_gadget_ep0_desc, NULL, false);
+		if (ret) {
+			dev_err(dwc->dev, "failed to enable %s\n", dep->name);
+			return;
+		}
+
+		dep = dwc->eps[1];
+		dep->flags = 0;
+		ret = __dwc3_gadget_ep_enable(dep, &dwc3_gadget_ep0_desc, NULL, false);
+		if (ret) {
+			dev_err(dwc->dev, "failed to enable %s\n", dep->name);
+			return;
+		}
+	}
+#else	
+#ifdef CONFIG_SEC_H_PROJECT
 	switch (dwc->speed_limit) {
 	case USB_SPEED_FULL:
 	case USB_SPEED_HIGH:
@@ -1861,7 +1807,7 @@ void dwc3_gadget_restart(struct dwc3 *dwc)
 		dev_err(dwc->dev, "failed to enable %s\n", dep->name);
 		return;
 	}
-
+#endif
 	/* begin to receive SETUP packets */
 	dwc->ep0state = EP0_SETUP_PHASE;
 	dwc3_ep0_out_start(dwc);
@@ -1913,7 +1859,30 @@ static int dwc3_gadget_start(struct usb_gadget *g,
 	dwc3_writel(dwc->regs, DWC3_DCFG, reg);
 
 	dwc->start_config_issued = false;
+#if defined(CONFIG_MACH_LT03EUR) || defined(CONFIG_MACH_LT03SKT)\
+	|| defined(CONFIG_MACH_LT03KTT)	|| defined(CONFIG_MACH_LT03LGT)
+	if(system_rev != 3)
+	{
+		/* Start with SuperSpeed Default */
+		dwc3_gadget_ep0_desc.wMaxPacketSize = cpu_to_le16(512);
 
+		dep = dwc->eps[0];
+		dep->endpoint.maxburst = 1;
+		ret = __dwc3_gadget_ep_enable(dep, &dwc3_gadget_ep0_desc, NULL, false);
+		if (ret) {
+			dev_err(dwc->dev, "failed to enable %s\n", dep->name);
+			goto err0;
+		}
+
+		dep = dwc->eps[1];
+		dep->endpoint.maxburst = 1;
+		ret = __dwc3_gadget_ep_enable(dep, &dwc3_gadget_ep0_desc, NULL, false);
+		if (ret) {
+			dev_err(dwc->dev, "failed to enable %s\n", dep->name);
+			goto err1;
+		}	
+	}
+#else
 	/* Start with SuperSpeed Default */
 	dwc3_gadget_ep0_desc.wMaxPacketSize = cpu_to_le16(512);
 
@@ -1932,7 +1901,7 @@ static int dwc3_gadget_start(struct usb_gadget *g,
 		dev_err(dwc->dev, "failed to enable %s\n", dep->name);
 		goto err1;
 	}
-
+#endif
 	/* begin to receive SETUP packets */
 	dwc->ep0state = EP0_SETUP_PHASE;
 	dwc3_ep0_out_start(dwc);
@@ -1946,6 +1915,7 @@ err1:
 	__dwc3_gadget_ep_disable(dwc->eps[0]);
 
 err0:
+	dwc->gadget_driver = NULL;
 	spin_unlock_irqrestore(&dwc->lock, flags);
 	pm_runtime_put(dwc->dev);
 
@@ -2010,6 +1980,7 @@ static int __devinit dwc3_gadget_init_endpoints(struct dwc3 *dwc)
 
 		if (epnum == 0 || epnum == 1) {
 			dep->endpoint.maxpacket = 512;
+			dep->endpoint.maxburst = 1;
 			dep->endpoint.ops = &dwc3_gadget_ep0_ops;
 			if (!epnum)
 				dwc->gadget.ep0 = &dep->endpoint;
@@ -2634,26 +2605,26 @@ static void dwc3_gadget_conndone_interrupt(struct dwc3 *dwc)
 	 * In both cases reset values should be sufficient.
 	 */
 
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
+#ifdef CONFIG_SEC_H_PROJECT
 	/*
-	 * Incase of H-Prj we want to Probe whether Host for super speed
-	 * We Start the UDC with speed_limit always USB_SPEED_SUPER.
-	 * if we connect at USB_SPEED_SUPER then we set that the ss_host_avail = 1
-	 * We then change the speed_limit to USB_HIGH_SPEED and schedule
-	 * a work item to reconnect at HIGH SPEED.
-	 * In factory mode we do not need this logic. we should always connect USB3.0
-	 */
-#ifndef CONFIG_SEC_FACTORY
-	if (dwc->ss_host_avail == -1) {
-		if (dwc->gadget.speed == USB_SPEED_SUPER) {
-			dwc->ss_host_avail = 1;
-			dwc->speed_limit = USB_SPEED_HIGH;
-			dwc->reconnect = true;
-		} else {
-			printk(KERN_ERR"usb: Super speed host not available \n");
-			dwc->ss_host_avail = 0;
+		Incase of H-Prj we want to Probe whether Host for super speed
+		We Start the UDC with speed_limit always USB_SPEED_SUPER.
+		if we connect at USB_SPEED_SUPER then we set that the ss_host_avail = 1
+		We then change the speed_limit to USB_HIGH_SPEED and schedule 
+		a work item to reconnect at HIGH SPEED.
+		In factory mode we do not need this logic. we should always connect USB3.0
+	*/	
+#ifndef CONFIG_SEC_FACTORY	
+		if (dwc->ss_host_avail == -1) {
+			if (dwc->gadget.speed == USB_SPEED_SUPER) {
+				dwc->ss_host_avail = 1;
+				dwc->speed_limit = USB_SPEED_HIGH;
+				dwc->reconnect = true;
+			} else {
+				printk(KERN_ERR"usb: Super speed host not available \n");
+				dwc->ss_host_avail = 0;
+			}
 		}
-	}
 #endif
 #endif
 }
@@ -2734,7 +2705,7 @@ static void dwc3_gadget_linksts_change_interrupt(struct dwc3 *dwc,
 
 	dwc->link_state = next;
 
-	dev_vdbg(dwc->dev, "%s link %d\n", __func__, dwc->link_state);
+	pr_debug("usb:: %s link %d\n", __func__, dwc->link_state);
 }
 
 static void dwc3_dump_reg_info(struct dwc3 *dwc)
@@ -2761,6 +2732,7 @@ static void dwc3_dump_reg_info(struct dwc3 *dwc)
 	dbg_print_reg("OSTS", dwc3_readl(dwc->regs, DWC3_OSTS));
 
 	dwc3_notify_event(dwc, DWC3_CONTROLLER_ERROR_EVENT);
+
 }
 
 static void dwc3_gadget_interrupt(struct dwc3 *dwc,
@@ -2783,22 +2755,17 @@ static void dwc3_gadget_interrupt(struct dwc3 *dwc,
 		dwc3_gadget_linksts_change_interrupt(dwc, event->event_info);
 		break;
 	case DWC3_DEVICE_EVENT_EOPF:
-		dev_vdbg(dwc->dev, "End of Periodic Frame\n");
 		break;
 	case DWC3_DEVICE_EVENT_SOF:
-		dev_vdbg(dwc->dev, "Start of Periodic Frame\n");
 		break;
 	case DWC3_DEVICE_EVENT_ERRATIC_ERROR:
 		dbg_event(0xFF, "ERROR", 0);
-		dev_vdbg(dwc->dev, "Erratic Error\n");
 		dwc3_dump_reg_info(dwc);
 		break;
 	case DWC3_DEVICE_EVENT_CMD_CMPL:
-		dev_vdbg(dwc->dev, "Command Complete\n");
 		break;
 	case DWC3_DEVICE_EVENT_OVERFLOW:
 		dbg_event(0xFF, "OVERFL", 0);
-		dev_vdbg(dwc->dev, "Overflow\n");
 		/*
 		 * Controllers prior to 2.30a revision has a bug where
 		 * Overflow Event may overwrite an unacknowledged event
@@ -2884,8 +2851,8 @@ static irqreturn_t dwc3_process_event_buf(struct dwc3 *dwc, u32 buf)
 
 		dwc3_writel(dwc->regs, DWC3_GEVNTCOUNT(buf), 4);
 	}
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
-	/* Schedule the reconnect work event */
+#ifdef CONFIG_SEC_H_PROJECT
+	/*Schedule the reconnect work event */
 	if (dwc->reconnect) {
 		dwc->reconnect = false;
 		WORK_SCHEDULE(dwc);
@@ -2962,11 +2929,7 @@ int __devinit dwc3_gadget_init(struct dwc3 *dwc)
 	dev_set_name(&dwc->gadget.dev, "gadget");
 
 	dwc->gadget.ops			= &dwc3_gadget_ops;
-#if defined(CONFIG_SEC_LT03_PROJECT) || defined(CONFIG_SEC_MONDRIAN_PROJECT)
-	dwc->gadget.max_speed		= USB_SPEED_HIGH;
-#else
 	dwc->gadget.max_speed		= USB_SPEED_SUPER;
-#endif
 	dwc->gadget.speed		= USB_SPEED_UNKNOWN;
 	dwc->gadget.dev.parent		= dwc->dev;
 	dwc->gadget.sg_supported	= true;
@@ -2997,10 +2960,6 @@ int __devinit dwc3_gadget_init(struct dwc3 *dwc)
 		goto err5;
 	}
 
-	reg = dwc3_readl(dwc->regs, DWC3_DCFG);
-	reg |= DWC3_DCFG_LPM_CAP;
-	dwc3_writel(dwc->regs, DWC3_DCFG, reg);
-
 	/* Enable all but Start and End of Frame IRQs */
 	reg = (DWC3_DEVTEN_EVNTOVERFLOWEN |
 			DWC3_DEVTEN_CMDCMPLTEN |
@@ -3014,10 +2973,6 @@ int __devinit dwc3_gadget_init(struct dwc3 *dwc)
 
 	/* Enable USB2 LPM and automatic phy suspend only on recent versions */
 	if (dwc->revision >= DWC3_REVISION_194A) {
-		reg = dwc3_readl(dwc->regs, DWC3_DCFG);
-		reg |= DWC3_DCFG_LPM_CAP;
-		dwc3_writel(dwc->regs, DWC3_DCFG, reg);
-
 		reg = dwc3_readl(dwc->regs, DWC3_DCTL);
 		reg &= ~(DWC3_DCTL_HIRD_THRES_MASK | DWC3_DCTL_L1_HIBER_EN);
 
@@ -3026,12 +2981,8 @@ int __devinit dwc3_gadget_init(struct dwc3 *dwc)
 
 		dwc3_writel(dwc->regs, DWC3_DCTL, reg);
 
-		/*
-		 * Clear autosuspend bit in dwc3 register for USB2. It will be
-		 * enabled before setting run/stop bit.
-		 */
 		dwc3_gadget_usb2_phy_suspend(dwc, false);
-		dwc3_gadget_usb3_phy_suspend(dwc, true);
+		dwc3_gadget_usb3_phy_suspend(dwc, false);
 	}
 
 	ret = device_register(&dwc->gadget.dev);
@@ -3123,11 +3074,11 @@ void dwc3_gadget_exit(struct dwc3 *dwc)
 	device_unregister(&dwc->gadget.dev);
 }
 
-#if defined(CONFIG_SEC_H_PROJECT) || defined(CONFIG_SEC_F_PROJECT)
-int sec_set_speedlimit(struct usb_gadget *gadget,
-			enum usb_device_speed speed)
+#ifdef CONFIG_SEC_H_PROJECT
+int msm_ss_udc_set_speedlimit(struct usb_gadget *gadget,
+							enum usb_device_speed speed)
 {
-	struct dwc3 *dwc;
+ 	struct dwc3 *dwc;
 	unsigned long flags;
 
 	if (!gadget)
@@ -3144,9 +3095,9 @@ int sec_set_speedlimit(struct usb_gadget *gadget,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(sec_set_speedlimit);
+EXPORT_SYMBOL_GPL(msm_ss_udc_set_speedlimit);
 
-int sec_get_ss_host_available(struct usb_gadget *gadget)
+int msm_ss_udc_get_ss_host_available(struct usb_gadget *gadget)
 {
 	struct dwc3 *dwc;
 	int      ss_host_avail;
@@ -3161,5 +3112,5 @@ int sec_get_ss_host_available(struct usb_gadget *gadget)
 	dev_dbg(dwc->dev,"Superspeed Host avail(%d) \n",ss_host_avail);
 	return ss_host_avail;
 }
-EXPORT_SYMBOL_GPL(sec_get_ss_host_available);
+EXPORT_SYMBOL_GPL(msm_ss_udc_get_ss_host_available);
 #endif

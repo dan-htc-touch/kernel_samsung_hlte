@@ -575,8 +575,7 @@ static int msm_dai_q6_slim_bus_hw_params(struct snd_pcm_hw_params *params,
 	dai_data->port_config.slim_sch.sb_cfg_minor_version =
 				AFE_API_VERSION_SLIMBUS_CONFIG;
 	dai_data->port_config.slim_sch.data_format = 0;
-	/* For Audience 3mic, temporary blocked */
-	/*dai_data->port_config.slim_sch.num_channels = dai_data->channels;*/
+	dai_data->port_config.slim_sch.num_channels = dai_data->channels;
 	dai_data->port_config.slim_sch.sample_rate = dai_data->rate;
 
 	dev_dbg(dai->dev, "%s:slimbus_dev_id[%hu] bit_wd[%hu] format[%hu]\n"
@@ -720,7 +719,6 @@ static int msm_dai_q6_hw_params(struct snd_pcm_substream *substream,
 		rc = msm_dai_q6_afe_rtproxy_hw_params(params, dai);
 		break;
 	case VOICE_PLAYBACK_TX:
-	case VOICE2_PLAYBACK_TX:
 	case VOICE_RECORD_RX:
 	case VOICE_RECORD_TX:
 		rc = msm_dai_q6_psuedo_port_hw_params(params,
@@ -2040,7 +2038,6 @@ static int msm_dai_q6_dev_probe(struct platform_device *pdev)
 		rc = snd_soc_register_dai(&pdev->dev, &msm_dai_q6_afe_tx_dai);
 		break;
 	case VOICE_PLAYBACK_TX:
-	case VOICE2_PLAYBACK_TX:
 		rc = snd_soc_register_dai(&pdev->dev,
 					&msm_dai_q6_voice_playback_tx_dai);
 		break;

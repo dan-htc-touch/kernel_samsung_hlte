@@ -79,12 +79,12 @@ static void sync_timeline_free(struct kref *kref)
 		container_of(kref, struct sync_timeline, kref);
 	unsigned long flags;
 
-	if (obj->ops->release_obj)
-		obj->ops->release_obj(obj);
-
 	spin_lock_irqsave(&sync_timeline_list_lock, flags);
 	list_del(&obj->sync_timeline_list);
 	spin_unlock_irqrestore(&sync_timeline_list_lock, flags);
+
+	if (obj->ops->release_obj)
+		obj->ops->release_obj(obj);
 
 	kfree(obj);
 }
@@ -92,14 +92,14 @@ static void sync_timeline_free(struct kref *kref)
 void sync_timeline_destroy(struct sync_timeline *obj)
 {
 	obj->destroyed = true;
-	smp_wmb();
 
 	/*
-	 * signal any children that their parent is going away.
+	 * If this is not the last reference, signal any children
+	 * that their parent is going away.
 	 */
-	sync_timeline_signal(obj);
 
-	kref_put(&obj->kref, sync_timeline_free);
+	if (!kref_put(&obj->kref, sync_timeline_free))
+		sync_timeline_signal(obj);
 }
 EXPORT_SYMBOL(sync_timeline_destroy);
 
@@ -634,6 +634,8 @@ static void sync_fence_free(struct kref *kref)
 
 	sync_fence_free_pts(fence);
 
+	fence->file->private_data = NULL;
+
 	kfree(fence);
 }
 
@@ -642,6 +644,10 @@ static int sync_fence_release(struct inode *inode, struct file *file)
 	struct sync_fence *fence = file->private_data;
 	unsigned long flags;
 
+	if (fence == NULL) {
+		pr_err("%s: fence already freed\n", __func__);
+		return -EIO;
+	}
 	/*
 	 * We need to remove all ways to access this fence before droping
 	 * our ref.
@@ -666,6 +672,11 @@ static int sync_fence_release(struct inode *inode, struct file *file)
 static unsigned int sync_fence_poll(struct file *file, poll_table *wait)
 {
 	struct sync_fence *fence = file->private_data;
+
+	if (fence == NULL) {
+		pr_err("%s: fence already freed\n", __func__);
+		return POLLERR;
+	}
 
 	poll_wait(file, &fence->wq, wait);
 
@@ -825,6 +836,10 @@ static long sync_fence_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long arg)
 {
 	struct sync_fence *fence = file->private_data;
+	if (fence == NULL) {
+		pr_err("%s: fence is already freed", __func__);
+		return -ENOTTY;
+	}
 	switch (cmd) {
 	case SYNC_IOC_WAIT:
 		return sync_fence_ioctl_wait(fence, arg);

@@ -582,8 +582,7 @@ static int mmc_sdio_init_uhs_card(struct mmc_card *card)
 	if (err)
 		goto out;
 
-// #if defined(CONFIG_BCM4335) || defined(CONFIG_BCM4335_MODULE) || defined(CONFIG_BCM4339) || defined(CONFIG_BCM4339_MODULE)
-#if 0
+#if defined(CONFIG_BCM4335) || defined(CONFIG_BCM4335_MODULE) || defined(CONFIG_BCM4339) || defined(CONFIG_BCM4339_MODULE)
 	/*
 	* Prevent tuning operation when init a card
 	* for WiFi operation with sdmmc.
@@ -618,9 +617,7 @@ static int mmc_sdio_init_card(struct mmc_host *host, u32 ocr,
 	BUG_ON(!host);
 	WARN_ON(!host->claimed);
 
-#if defined(CONFIG_BCM4335) || defined(CONFIG_BCM4335_MODULE) || \
-    defined(CONFIG_BCM4339) || defined(CONFIG_BCM4339_MODULE) || \
-    defined(CONFIG_BCM4354) || defined(CONFIG_BCM4354_MODULE)
+#if defined(CONFIG_BCM4335) || defined(CONFIG_BCM4335_MODULE) || defined(CONFIG_BCM4339) || defined(CONFIG_BCM4339_MODULE)
 	/* If host that supports UHS-I sets S18R to 1 in arg of CMD5 to request
 	 * change of signaling level to 1.8V
 	 */
@@ -1284,7 +1281,7 @@ err:
 
 int sdio_reset_comm(struct mmc_card *card)
 {
-#if defined(CONFIG_BCM4339) || defined(CONFIG_BCM4335) || defined(CONFIG_BCM4354)
+#if defined(CONFIG_BCM4339) || defined(CONFIG_BCM4335)
 	struct mmc_host *host = card->host;
 	u32 ocr;
 	int err;
@@ -1319,6 +1316,6 @@ err:
 	return err;
 #else
 	return mmc_power_restore_host(card->host);
-#endif /* CONFIG_BCM4339 || CONFIG_BCM4335  || CONFIG_BCM4354 */
+#endif /* CONFIG_BCM4339 || CONFIG_BCM4335 */
 }
 EXPORT_SYMBOL(sdio_reset_comm);

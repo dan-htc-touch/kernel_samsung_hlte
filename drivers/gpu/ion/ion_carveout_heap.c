@@ -149,18 +149,7 @@ int ion_carveout_heap_map_user(struct ion_heap *heap, struct ion_buffer *buffer,
 			       struct vm_area_struct *vma)
 {
 	int ret_value = 0;
-#ifdef CONFIG_TIMA_RKP
-        if (buffer->size) {
-        /* iommu optimization- needs to be turned ON from
-         * the tz side.
-         */
-                cpu_v7_tima_iommu_opt(vma->vm_start, vma->vm_end, (unsigned long)vma->vm_mm->pgd);
-                __asm__ __volatile__ (
-                "mcr    p15, 0, r0, c8, c3, 0\n"
-                "dsb\n"
-                "isb\n");
-        }
-#endif
+
 	if (!ION_IS_CACHED(buffer->flags))
 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 
@@ -173,7 +162,7 @@ int ion_carveout_heap_map_user(struct ion_heap *heap, struct ion_buffer *buffer,
 }
 
 static int ion_carveout_print_debug(struct ion_heap *heap, struct seq_file *s,
-				    const struct list_head *mem_map)
+				    const struct rb_root *mem_map)
 {
 	struct ion_carveout_heap *carveout_heap =
 		container_of(heap, struct ion_carveout_heap, heap);
@@ -187,14 +176,16 @@ static int ion_carveout_print_debug(struct ion_heap *heap, struct seq_file *s,
 		unsigned long size = carveout_heap->total_size;
 		unsigned long end = base+size;
 		unsigned long last_end = base;
-		struct mem_map_data *data;
+		struct rb_node *n;
 
 		seq_printf(s, "\nMemory Map\n");
 		seq_printf(s, "%16.s %14.s %14.s %14.s\n",
 			   "client", "start address", "end address",
 			   "size (hex)");
 
-		list_for_each_entry(data, mem_map, node) {
+		for (n = rb_first(mem_map); n; n = rb_next(n)) {
+			struct mem_map_data *data =
+					rb_entry(n, struct mem_map_data, node);
 			const char *client_name = "(null)";
 
 			if (last_end < data->addr) {
